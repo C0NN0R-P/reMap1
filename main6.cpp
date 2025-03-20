@@ -207,7 +207,7 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
     pe.precise_ip = 0;
 
     // Ensure cpuid matches `perf_test17`
-    //cpuid = 0;  // Try -1 if `perf_test17` does it
+    cpuid = 0;  // Try -1 if `perf_test17` does it
 
     //std::cout << "DEBUG: pe.type = " << pe.type << std::endl;
     //std::cout << "DEBUG: pe.config = 0x" << std::hex << pe.config << std::dec << std::endl;
@@ -353,19 +353,7 @@ uint64_t getUsableBits(uint64_t removeFront, uint64_t removeBack)
 void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
                     uint64_t removeFront, uint64_t removeBack)
 {
-    std::cout << "\n=== Debug: Addresses Before Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
-
-    auto usableBits = getUsableBits(removeFront, removeBack);
+    auto usableBits = getUsableBits(removeFront,removeBack);
     uint64_t mask = 1;
     mask = mask << usableBits;
     mask = mask - 1ULL;
@@ -378,20 +366,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
             a &= mask;
         }
     }
-
-    std::cout << "\n=== Debug: Addresses After Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
 }
-
 
 std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,std::vector<size_t>>& addresses, size_t addrFuncBits, size_t usableBits)
 {
@@ -410,12 +385,6 @@ std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,
                 matrix.push_back(rowWithResult);
             }
         }
-        std::cout << "\n=== Debug: Solver Input Matrix ===\n";
-        for (auto row : matrix) {
-            std::cout << std::bitset<64>(row) << std::endl;
-        }
-        std::cout << "====================================\n";
-
         s.solve(matrix,usableBits);
         auto sol = s.getSolution(matrix);
         sList.push_back(sol);
@@ -484,19 +453,6 @@ void prepareSolvePrint(AddressSet adrs,size_t removeFront, size_t removeBack)
     adrs = compactSets(adrs);
     auto expectedBits = static_cast<size_t>(ceil(log2(adrs.size())));
     auto cSol = calculateAddressingFunction(adrs,expectedBits,getUsableBits(removeFront,removeBack));
-    std::cout << "\n=== DEBUG: First 10 addresses before solving ===\n";
-    int count = 0;
-    for (const auto &entry : adrs) {
-        std::cout << "Set " << entry.first << ": ";
-        for (const auto &addr : entry.second) {
-            std::cout << std::hex << addr << " ";
-            if (++count >= 10) break; // only print first 10
-        }
-        std::cout << std::endl;
-        if (count >= 10) break;
-    }
-    std::cout << "================================================\n";
-
     printSolutions(cSol,removeFront);
 }
 
@@ -507,8 +463,8 @@ int main(int argc, char *argv[])
     bool verbose = false;
     bool considerTadRegions = false;
     unsigned int sizeGb = 20;
-    size_t numAddressTotal = 5000;
-    size_t numAccess = 4000;
+    size_t numAddressTotal = 1000;
+    size_t numAccess = 2000;
     while ((opt = getopt(argc, argv, "vrs:n:a:")) != -1)
     {
         switch (opt)

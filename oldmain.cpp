@@ -154,35 +154,29 @@ static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
     return ret;
 }
 
-int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned int bank, bool bankGroup=false)
+
+
+int setupMeasure(int cpuid, unsigned int channel,unsigned int rank, unsigned int bank, bool bankGroup=false)
 {
-    static int fd = -1;
     struct perf_event_attr pe;
+    int fd;
 
     memset(&pe, 0, sizeof(struct perf_event_attr));
 
     auto imcs = SysInfo::getImcs();
-    if (imcs.size() == 0)
+    if(imcs.size() == 0)
     {
         std::cout << "No memory controller PMU found" << std::endl;
         exit(EXIT_FAILURE);
     }
     auto imc = imcs[channel];
-
-    pe.type = 0xd;  // Ensure IMC PMU is correct
-    pe.size = sizeof(struct perf_event_attr);  // Ensure correct size
-
-    // Correcting config value
-    //unsigned int bankBits = (bankGroup) ? (0b00010001 + bank) : bank;
-    //bankBits = bankBits << 8;
-    //auto rankBits = 0xb0 + rank;
-    //pe.config = bankBits | rankBits;  // Correct order
-    
-    //pe.config = (0x10 << 8) | 0xb0; // This value definitely works
-    //pe.config = (0x13 << 8) | 0xb0;
-
-    unsigned int bankBits = 0b00010000;
-    if(bankGroup  == true)
+    pe.type = SysInfo::getTypeOfImc(imc);
+    pe.size = sizeof(struct perf_event_attr);
+    //pe.config = (0b11 << 8) | 0x04; // CAS_COUNT_READ
+    //pe.config = (0b00001100 << 8) | 0x04; // CAS_COUNT_WR
+    //unsigned int bankBits = 0b00010000;//all banks
+    unsigned int bankBits = 0;
+    if(bankGroup==true)
     {
         bankBits = 0b00010001 + bank;
     }
@@ -193,109 +187,40 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
     bankBits = bankBits << 8;
     auto rankBits = 0xb0 + rank;
     auto bits = bankBits | rankBits;
-    pe.config = bits;
-
-    //pe.config = (0x10 << 8) | 0xb0;
-
-    // Additional settings based on `perf_test17`
-    pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
-    pe.sample_type = PERF_SAMPLE_IDENTIFIER;  // PERF_SAMPLE_IDENTIFIER not always needed
+    pe.config = bits ; //umask first followed by event id
+    // exact config is in cat /sys/devices/cpu/format/event
     pe.disabled = 1;
-    pe.exclude_kernel = 0;
-    pe.exclude_hv = 0;
-    //pe.exclude_guest = 1;
-    pe.precise_ip = 0;
+    pe.sample_type=PERF_SAMPLE_IDENTIFIER;
+    pe.inherit=0;
+    pe.exclude_guest=1;
 
-    // Ensure cpuid matches `perf_test17`
-    //cpuid = 0;  // Try -1 if `perf_test17` does it
-
-    //std::cout << "DEBUG: pe.type = " << pe.type << std::endl;
-    //std::cout << "DEBUG: pe.config = 0x" << std::hex << pe.config << std::dec << std::endl;
-    //std::cout << "DEBUG: pe.read_format = " << pe.read_format << std::endl;
-    //std::cout << "DEBUG: pe.sample_type = " << pe.sample_type << std::endl;
-    //std::cout << "DEBUG: pe.disabled = " << pe.disabled << std::endl;
-    //std::cout << "DEBUG: pe.exclude_kernel = " << pe.exclude_kernel << std::endl;
-    //std::cout << "DEBUG: pe.exclude_hv = " << pe.exclude_hv << std::endl;
-    //std::cout << "DEBUG: pe.exclude_guest = " << pe.exclude_guest << std::endl;
-    //std::cout << "DEBUG: cpuid = " << cpuid << std::endl;
-
+    //how to get per-socket numbers? choose the cpu id in syscall
+    //pid = -1 cpu >= 0 -> global measurement
+    fd = perf_event_open(&pe, -1, cpuid, -1, 0);
     if (fd == -1) {
-        fd = syscall(__NR_perf_event_open, &pe, -1, cpuid, -1, 0);
-        if (fd == -1) {
-            std::cerr << "perf_event_open failed: " << strerror(errno) << " (errno: " << errno << ")" << std::endl;
-            std::cout << "Setup of performance counters failed" << std::endl;
-            exit(EXIT_FAILURE);
-        }
-    } else {
-        //std::cout << "Reusing existing performance counter (fd=" << fd << ")" << std::endl;
+        std::cout << "Setup of performance counters failed" << std::endl;
+        exit(EXIT_FAILURE);
     }
+
     return fd;
 }
 
-void startMeasure(int fd, long long &initialCount)
+void startMeasure(int fd)
 {
-    if (fd == -1) {
-        std::cout << "ERROR: Invalid file descriptor (fd = -1), skipping measurement" << std::endl;
-        return;
-    }
-
-    long long count;
-    _mm_mfence();  // Ensure memory operations are completed before measurement
+    _mm_mfence();
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
-    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);  // Disable counter before reading
-
-    // Read and store the initial count
-    //read(fd, &count, sizeof(long long));
-    struct read_format {
-        uint64_t value;
-        uint64_t time_enabled;
-        uint64_t time_running;
-    };
-
-    read_format rf;
-    read(fd, &rf, sizeof(rf));
-
-    long long initialCount1 = rf.value;
-    //initialCount = eventDifference;  // Store initial count to subtract later
-
-    //std::cout << "DEBUG: Stored Initial Count = " << initialCount1 << std::endl;
-
-    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);  // Enable counter for measurement
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 }
 
-long long stopMeasure(int fd, long long initialCount1)
+long long stopMeasure(int fd)
 {
-    if (fd == -1) {
-        std::cout << "ERROR: Invalid file descriptor (fd = -1), skipping measurement" << std::endl;
-        return -1;
-    }
-
-    long long finalCount;
-    _mm_mfence();  // Memory fence to ensure correct ordering
-    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);  // Stop counter
-
-    // Read the final count
-    //read(fd, &finalCount, sizeof(long long));
-    struct read_format {
-        uint64_t value;
-        uint64_t time_enabled;
-        uint64_t time_running;
-    };
-
-    read_format rf;
-    read(fd, &rf, sizeof(rf));
-
-    long long finalCount1 = rf.value;
-
-    // Compute the actual difference
-    long long eventDifference = finalCount1 - initialCount1;
-
-    // std::cout << "DEBUG: Final Count = " << finalCount1
-    //          << ", Event Difference = " << eventDifference << std::endl;
-
-    return eventDifference;  // Return the measured difference
+    long long count;
+    _mm_mfence();
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+    read(fd, &count, sizeof(long long));
+    close(fd);
+    return count;
 }
-
 
 uint64_t getRandomAddress(uint64_t base, uint64_t size)
 {
@@ -353,19 +278,7 @@ uint64_t getUsableBits(uint64_t removeFront, uint64_t removeBack)
 void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
                     uint64_t removeFront, uint64_t removeBack)
 {
-    std::cout << "\n=== Debug: Addresses Before Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
-
-    auto usableBits = getUsableBits(removeFront, removeBack);
+    auto usableBits = getUsableBits(removeFront,removeBack);
     uint64_t mask = 1;
     mask = mask << usableBits;
     mask = mask - 1ULL;
@@ -378,20 +291,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
             a &= mask;
         }
     }
-
-    std::cout << "\n=== Debug: Addresses After Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
 }
-
 
 std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,std::vector<size_t>>& addresses, size_t addrFuncBits, size_t usableBits)
 {
@@ -410,12 +310,6 @@ std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,
                 matrix.push_back(rowWithResult);
             }
         }
-        std::cout << "\n=== Debug: Solver Input Matrix ===\n";
-        for (auto row : matrix) {
-            std::cout << std::bitset<64>(row) << std::endl;
-        }
-        std::cout << "====================================\n";
-
         s.solve(matrix,usableBits);
         auto sol = s.getSolution(matrix);
         sList.push_back(sol);
@@ -484,19 +378,6 @@ void prepareSolvePrint(AddressSet adrs,size_t removeFront, size_t removeBack)
     adrs = compactSets(adrs);
     auto expectedBits = static_cast<size_t>(ceil(log2(adrs.size())));
     auto cSol = calculateAddressingFunction(adrs,expectedBits,getUsableBits(removeFront,removeBack));
-    std::cout << "\n=== DEBUG: First 10 addresses before solving ===\n";
-    int count = 0;
-    for (const auto &entry : adrs) {
-        std::cout << "Set " << entry.first << ": ";
-        for (const auto &addr : entry.second) {
-            std::cout << std::hex << addr << " ";
-            if (++count >= 10) break; // only print first 10
-        }
-        std::cout << std::endl;
-        if (count >= 10) break;
-    }
-    std::cout << "================================================\n";
-
     printSolutions(cSol,removeFront);
 }
 
@@ -507,8 +388,8 @@ int main(int argc, char *argv[])
     bool verbose = false;
     bool considerTadRegions = false;
     unsigned int sizeGb = 20;
-    size_t numAddressTotal = 5000;
-    size_t numAccess = 4000;
+    size_t numAddressTotal = 1000;
+    size_t numAccess = 2000;
     while ((opt = getopt(argc, argv, "vrs:n:a:")) != -1)
     {
         switch (opt)
@@ -576,7 +457,6 @@ int main(int argc, char *argv[])
         int identifiedBank = -1;
         int identifiedBankGroup = -1;
         bool found = false;
-        long long maxCount = 0; // Track highest event count found
         for(unsigned int channel = 0; channel < 4 && !found; channel++)
         {
             for(unsigned int rank = 0; rank < 8 && !found; rank++)
@@ -584,37 +464,26 @@ int main(int argc, char *argv[])
 
                 for(unsigned int bank = 0; bank < 16 && !found; bank++)
                 {
-                    long long initialCount = 0;
-                    //cout << "Trying: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
                     usleep(1);
                     auto fd = setupMeasure(cpuid,channel,rank,bank);
-                    startMeasure(fd, initialCount);
+                    startMeasure(fd);
                     access(adr,numAccess);
-                    auto count = stopMeasure(fd, initialCount);
-
-                    //cout << "Count for (C=" << channel << ", R=" << rank << ", B=" << bank << "): "  << count << endl;
-
+                    auto count = stopMeasure(fd);
                     if (count >= 0.9*numAccess)
                     {
-                        //cout << "VALID: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
-                        if (count > maxCount) // Only update if higher count is found
-                        {
-                            maxCount = count;
-                            identifiedChannel = channel;
-                            identifiedRank = rank;
-                            identifiedBank = bank;
-                            found = true;
-                        }
+                        identifiedChannel = channel;
+                        identifiedRank = rank;
+                        identifiedBank = bank;
+                        found = true;
                     }
                 }
 
                 for(unsigned int bankGroup = 0; bankGroup < 4; bankGroup++)
                 {
-                    long long initialCount = 0;
                     auto fd = setupMeasure(cpuid,channel,rank,bankGroup,true);
-                    startMeasure(fd, initialCount);
+                    startMeasure(fd);
                     access(adr,numAccess);
-                    auto count = stopMeasure(fd, initialCount);
+                    auto count = stopMeasure(fd);
                     if (count >= 0.9*numAccess)
                     {
                         identifiedBankGroup = bankGroup;
@@ -633,25 +502,25 @@ int main(int argc, char *argv[])
         }
         else
         {
-            //std::cout  << " No set found" << endl;
+            if(verbose) std::cout  << " No set found" << endl;
         }
     }
 
     for (size_t i = 0 ;i < 4; i++)
     {
-        std::cout << "Captured " << channelAddresses[i].size() << " addresses on channel " << i << endl;
+        std::cout << "Caputured " << channelAddresses[i].size() << " addresses on channel " << i << endl;
     }
     for (size_t j = 0 ;j < 8; j++)
     {
-        std::cout << "Captured " << rankAddresses[j].size() << " addresses on rank " << j << endl;
+        std::cout << "Caputured " << rankAddresses[j].size() << " addresses on rank " << j << endl;
     }
     for(size_t k = 0; k < 16; k++)
     {
-        std::cout << "Captured " << bankAddresses[k].size() << " addresses on bank " << k << endl;
+        std::cout << "Caputured " << bankAddresses[k].size() << " addresses on bank " << k << endl;
     }
     for(size_t k = 0; k < 4; k++)
     {
-        std::cout << "Captured " << bankGroupAddresses[k].size() << " addresses on bankGroup " << k << endl;
+        std::cout << "Caputured " << bankGroupAddresses[k].size() << " addresses on bankGroup " << k << endl;
     }
     cout << endl;
 

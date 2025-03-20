@@ -207,10 +207,10 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
     pe.precise_ip = 0;
 
     // Ensure cpuid matches `perf_test17`
-    //cpuid = 0;  // Try -1 if `perf_test17` does it
+    cpuid = 0;  // Try -1 if `perf_test17` does it
 
     //std::cout << "DEBUG: pe.type = " << pe.type << std::endl;
-    //std::cout << "DEBUG: pe.config = 0x" << std::hex << pe.config << std::dec << std::endl;
+    std::cout << "DEBUG: pe.config = 0x" << std::hex << pe.config << std::dec << std::endl;
     //std::cout << "DEBUG: pe.read_format = " << pe.read_format << std::endl;
     //std::cout << "DEBUG: pe.sample_type = " << pe.sample_type << std::endl;
     //std::cout << "DEBUG: pe.disabled = " << pe.disabled << std::endl;
@@ -227,7 +227,7 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
             exit(EXIT_FAILURE);
         }
     } else {
-        //std::cout << "Reusing existing performance counter (fd=" << fd << ")" << std::endl;
+        std::cout << "Reusing existing performance counter (fd=" << fd << ")" << std::endl;
     }
     return fd;
 }
@@ -241,7 +241,6 @@ void startMeasure(int fd, long long &initialCount)
 
     long long count;
     _mm_mfence();  // Ensure memory operations are completed before measurement
-    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);  // Disable counter before reading
 
     // Read and store the initial count
@@ -258,7 +257,7 @@ void startMeasure(int fd, long long &initialCount)
     long long initialCount1 = rf.value;
     //initialCount = eventDifference;  // Store initial count to subtract later
 
-    //std::cout << "DEBUG: Stored Initial Count = " << initialCount1 << std::endl;
+    std::cout << "DEBUG: Stored Initial Count = " << initialCount1 << std::endl;
 
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);  // Enable counter for measurement
 }
@@ -290,8 +289,8 @@ long long stopMeasure(int fd, long long initialCount1)
     // Compute the actual difference
     long long eventDifference = finalCount1 - initialCount1;
 
-    // std::cout << "DEBUG: Final Count = " << finalCount1
-    //          << ", Event Difference = " << eventDifference << std::endl;
+    std::cout << "DEBUG: Final Count = " << finalCount1
+              << ", Event Difference = " << eventDifference << std::endl;
 
     return eventDifference;  // Return the measured difference
 }
@@ -353,19 +352,7 @@ uint64_t getUsableBits(uint64_t removeFront, uint64_t removeBack)
 void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
                     uint64_t removeFront, uint64_t removeBack)
 {
-    std::cout << "\n=== Debug: Addresses Before Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
-
-    auto usableBits = getUsableBits(removeFront, removeBack);
+    auto usableBits = getUsableBits(removeFront,removeBack);
     uint64_t mask = 1;
     mask = mask << usableBits;
     mask = mask - 1ULL;
@@ -378,20 +365,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
             a &= mask;
         }
     }
-
-    std::cout << "\n=== Debug: Addresses After Cleaning ===\n";
-    for (const auto& list : addresses)
-    {
-        std::cout << "Set " << list.first << ": ";
-        for (auto a : list.second)
-        {
-            std::cout << std::hex << a << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << "=========================================\n";
 }
-
 
 std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,std::vector<size_t>>& addresses, size_t addrFuncBits, size_t usableBits)
 {
@@ -410,12 +384,6 @@ std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,
                 matrix.push_back(rowWithResult);
             }
         }
-        std::cout << "\n=== Debug: Solver Input Matrix ===\n";
-        for (auto row : matrix) {
-            std::cout << std::bitset<64>(row) << std::endl;
-        }
-        std::cout << "====================================\n";
-
         s.solve(matrix,usableBits);
         auto sol = s.getSolution(matrix);
         sList.push_back(sol);
@@ -484,19 +452,6 @@ void prepareSolvePrint(AddressSet adrs,size_t removeFront, size_t removeBack)
     adrs = compactSets(adrs);
     auto expectedBits = static_cast<size_t>(ceil(log2(adrs.size())));
     auto cSol = calculateAddressingFunction(adrs,expectedBits,getUsableBits(removeFront,removeBack));
-    std::cout << "\n=== DEBUG: First 10 addresses before solving ===\n";
-    int count = 0;
-    for (const auto &entry : adrs) {
-        std::cout << "Set " << entry.first << ": ";
-        for (const auto &addr : entry.second) {
-            std::cout << std::hex << addr << " ";
-            if (++count >= 10) break; // only print first 10
-        }
-        std::cout << std::endl;
-        if (count >= 10) break;
-    }
-    std::cout << "================================================\n";
-
     printSolutions(cSol,removeFront);
 }
 
@@ -507,8 +462,8 @@ int main(int argc, char *argv[])
     bool verbose = false;
     bool considerTadRegions = false;
     unsigned int sizeGb = 20;
-    size_t numAddressTotal = 5000;
-    size_t numAccess = 4000;
+    size_t numAddressTotal = 1000;
+    size_t numAccess = 2000;
     while ((opt = getopt(argc, argv, "vrs:n:a:")) != -1)
     {
         switch (opt)
@@ -585,18 +540,18 @@ int main(int argc, char *argv[])
                 for(unsigned int bank = 0; bank < 16 && !found; bank++)
                 {
                     long long initialCount = 0;
-                    //cout << "Trying: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
+                    cout << "Trying: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
                     usleep(1);
                     auto fd = setupMeasure(cpuid,channel,rank,bank);
                     startMeasure(fd, initialCount);
                     access(adr,numAccess);
                     auto count = stopMeasure(fd, initialCount);
 
-                    //cout << "Count for (C=" << channel << ", R=" << rank << ", B=" << bank << "): "  << count << endl;
+                    cout << "Count for (C=" << channel << ", R=" << rank << ", B=" << bank << "): "  << count << endl;
 
                     if (count >= 0.9*numAccess)
                     {
-                        //cout << "VALID: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
+                        cout << "VALID: Channel " << channel << ", Rank " << rank << ", Bank " << bank << endl;
                         if (count > maxCount) // Only update if higher count is found
                         {
                             maxCount = count;
@@ -633,25 +588,25 @@ int main(int argc, char *argv[])
         }
         else
         {
-            //std::cout  << " No set found" << endl;
+            std::cout  << " No set found" << endl;
         }
     }
 
     for (size_t i = 0 ;i < 4; i++)
     {
-        std::cout << "Captured " << channelAddresses[i].size() << " addresses on channel " << i << endl;
+        std::cout << "Caputured " << channelAddresses[i].size() << " addresses on channel " << i << endl;
     }
     for (size_t j = 0 ;j < 8; j++)
     {
-        std::cout << "Captured " << rankAddresses[j].size() << " addresses on rank " << j << endl;
+        std::cout << "Caputured " << rankAddresses[j].size() << " addresses on rank " << j << endl;
     }
     for(size_t k = 0; k < 16; k++)
     {
-        std::cout << "Captured " << bankAddresses[k].size() << " addresses on bank " << k << endl;
+        std::cout << "Caputured " << bankAddresses[k].size() << " addresses on bank " << k << endl;
     }
     for(size_t k = 0; k < 4; k++)
     {
-        std::cout << "Captured " << bankGroupAddresses[k].size() << " addresses on bankGroup " << k << endl;
+        std::cout << "Caputured " << bankGroupAddresses[k].size() << " addresses on bankGroup " << k << endl;
     }
     cout << endl;
 

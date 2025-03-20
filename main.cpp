@@ -375,7 +375,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
         for(auto& a : list.second)
         {
             a >>= removeFront;
-            a &= mask;
+            a &= (mask | 0xFFF); //preserve lower 12 bits
         }
     }
 
@@ -415,6 +415,11 @@ std::vector<Solver::Solution> calculateAddressingFunction(const std::map<size_t,
             std::cout << std::bitset<64>(row) << std::endl;
         }
         std::cout << "====================================\n";
+
+        if (matrix.size() < 10) {
+            std::cerr << "ERROR: Not enough unique data for solver - matrix size = " << matrix.size() << std::endl;
+            return {}; 
+        }
 
         s.solve(matrix,usableBits);
         auto sol = s.getSolution(matrix);

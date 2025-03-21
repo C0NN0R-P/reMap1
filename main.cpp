@@ -375,7 +375,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>>& addresses,
         for(auto& a : list.second)
         {
             a >>= removeFront;
-            a &= (mask | 0xFFF); //preserve lower 12 bits
+            a &= mask;
         }
     }
 

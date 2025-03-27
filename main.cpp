@@ -125,9 +125,7 @@ uint64_t getPhysicalAddr(uint64_t virtualAddr) {
     off_t offset = (virtualAddr / 4096) * sizeof(value);
     int got = pread(g_pagemap_fd, &value, sizeof(value), offset);
     assert(got == 8);
-
-    // Check the "page present" flag.
-    assert(value & (1ULL << 63));
+    assert(value & (1ULL << 63)); // Check the page present flag
     uint64_t frame_num = frameNumberFromPagemap(value);
     return (frame_num * 4096) | (virtualAddr & (4095));
 }
@@ -142,16 +140,6 @@ void access(uint64_t addr,size_t numAccess)
         *p;
         _mm_lfence();
     }
-}
-
-static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
-                            int cpu, int group_fd, unsigned long flags)
-{
-    int ret;
-
-    ret = syscall(__NR_perf_event_open, hw_event, pid, cpu,
-                  group_fd, flags);
-    return ret;
 }
 
 int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned int bank, bool bankGroup=false)
@@ -171,16 +159,6 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
 
     pe.type = 0xd;  // Ensure IMC PMU is correct
     pe.size = sizeof(struct perf_event_attr);  // Ensure correct size
-
-    // Correcting config value
-    //unsigned int bankBits = (bankGroup) ? (0b00010001 + bank) : bank;
-    //bankBits = bankBits << 8;
-    //auto rankBits = 0xb0 + rank;
-    //pe.config = bankBits | rankBits;  // Correct order
-    
-    //pe.config = (0x10 << 8) | 0xb0; // This value definitely works
-    //pe.config = (0x13 << 8) | 0xb0;
-
     unsigned int bankBits = 0b00010000;
     if(bankGroup  == true)
     {
@@ -194,30 +172,12 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
     auto rankBits = 0xb0 + rank;
     auto bits = bankBits | rankBits;
     pe.config = bits;
-
-    //pe.config = (0x10 << 8) | 0xb0;
-
-    // Additional settings based on `perf_test17`
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
-    pe.sample_type = PERF_SAMPLE_IDENTIFIER;  // PERF_SAMPLE_IDENTIFIER not always needed
+    pe.sample_type = PERF_SAMPLE_IDENTIFIER; 
     pe.disabled = 1;
     pe.exclude_kernel = 0;
     pe.exclude_hv = 0;
-    //pe.exclude_guest = 1;
     pe.precise_ip = 0;
-
-    // Ensure cpuid matches `perf_test17`
-    //cpuid = 0;  // Try -1 if `perf_test17` does it
-
-    //std::cout << "DEBUG: pe.type = " << pe.type << std::endl;
-    //std::cout << "DEBUG: pe.config = 0x" << std::hex << pe.config << std::dec << std::endl;
-    //std::cout << "DEBUG: pe.read_format = " << pe.read_format << std::endl;
-    //std::cout << "DEBUG: pe.sample_type = " << pe.sample_type << std::endl;
-    //std::cout << "DEBUG: pe.disabled = " << pe.disabled << std::endl;
-    //std::cout << "DEBUG: pe.exclude_kernel = " << pe.exclude_kernel << std::endl;
-    //std::cout << "DEBUG: pe.exclude_hv = " << pe.exclude_hv << std::endl;
-    //std::cout << "DEBUG: pe.exclude_guest = " << pe.exclude_guest << std::endl;
-    //std::cout << "DEBUG: cpuid = " << cpuid << std::endl;
 
     if (fd == -1) {
         fd = syscall(__NR_perf_event_open, &pe, -1, cpuid, -1, 0);
@@ -226,8 +186,6 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
             std::cout << "Setup of performance counters failed" << std::endl;
             exit(EXIT_FAILURE);
         }
-    } else {
-        //std::cout << "Reusing existing performance counter (fd=" << fd << ")" << std::endl;
     }
     return fd;
 }
@@ -239,13 +197,11 @@ void startMeasure(int fd, long long &initialCount)
         return;
     }
 
-    long long count;
     _mm_mfence();  // Ensure memory operations are completed before measurement
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);  // Disable counter before reading
 
     // Read and store the initial count
-    //read(fd, &count, sizeof(long long));
     struct read_format {
         uint64_t value;
         uint64_t time_enabled;
@@ -254,12 +210,6 @@ void startMeasure(int fd, long long &initialCount)
 
     read_format rf;
     read(fd, &rf, sizeof(rf));
-
-    long long initialCount1 = rf.value;
-    //initialCount = eventDifference;  // Store initial count to subtract later
-
-    //std::cout << "DEBUG: Stored Initial Count = " << initialCount1 << std::endl;
-
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);  // Enable counter for measurement
 }
 
@@ -270,12 +220,8 @@ long long stopMeasure(int fd, long long initialCount1)
         return -1;
     }
 
-    long long finalCount;
     _mm_mfence();  // Memory fence to ensure correct ordering
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);  // Stop counter
-
-    // Read the final count
-    //read(fd, &finalCount, sizeof(long long));
     struct read_format {
         uint64_t value;
         uint64_t time_enabled;
@@ -284,14 +230,8 @@ long long stopMeasure(int fd, long long initialCount1)
 
     read_format rf;
     read(fd, &rf, sizeof(rf));
-
     long long finalCount1 = rf.value;
-
-    // Compute the actual difference
-    long long eventDifference = finalCount1 - initialCount1;
-
-    // std::cout << "DEBUG: Final Count = " << finalCount1
-    //          << ", Event Difference = " << eventDifference << std::endl;
+    long long eventDifference = finalCount1 - initialCount1; // Compute the actual difference
 
     return eventDifference;  // Return the measured difference
 }
@@ -453,7 +393,27 @@ void printSolution(const Solver::Solution& s, size_t offset)
     }
     else
     {
-        std::cout << "No solution exists" << std::endl;
+        std::cout << "No exact solution found" << std::endl;
+        
+        std::map<size_t, size_t> bitFrequency;
+        for (auto b : s.unknownBits)
+            bitFrequency[b] = 0;
+
+        for (auto b : s.involvedBits)
+            bitFrequency[b]++;
+
+        size_t maxVotes = 0;
+        for (auto [bit, votes] : bitFrequency)
+            if (votes > maxVotes) maxVotes = votes;
+
+        std::cout << "Likely bits (>=95% confidence): ";
+        for (auto [bit, votes] : bitFrequency) {
+            double confidence = (maxVotes > 0) ? (100.0 * votes / maxVotes) : 0.0;
+            if (confidence >= 95.0) {
+                std::cout << std::dec << (offset + static_cast<size_t>(bit)) << " (" << confidence << "%) ";
+            }
+        }
+        std::cout << std::endl;
     }
 }
 
@@ -583,7 +543,6 @@ int main(int argc, char *argv[])
         int identifiedBankGroup = -1;
         bool found = false;
         long long maxCount = 0; // Track highest event count found
-        long long maxBankGroupCount = 0;
         for(unsigned int channel = 0; channel < 4 && !found; channel++)
         {
             for(unsigned int rank = 0; rank < 8 && !found; rank++)
@@ -616,7 +575,7 @@ int main(int argc, char *argv[])
                 }
             }
         }
-        if(found && identifiedChannel < 4 && identifiedRank < 8 && identifiedBank << 16)
+        if(found && identifiedChannel < 4 && identifiedRank < 8 && identifiedBank < 16)
         {
             successfulMatches++;
             if(verbose) cout << bitset<64>(physicalAddress);

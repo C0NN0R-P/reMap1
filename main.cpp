@@ -514,6 +514,7 @@ int main(int argc, char *argv[])
     unsigned int sizeGb = 20;
     size_t numAddressTotal = 5000;
     size_t numAccess = 4000;
+    int failedPmuMatches = 0;
     while ((opt = getopt(argc, argv, "vrs:n:a:")) != -1)
     {
         switch (opt)
@@ -620,10 +621,12 @@ int main(int argc, char *argv[])
             channelAddresses[identifiedChannel].push_back(physicalAddress);
             rankAddresses[identifiedRank].push_back(physicalAddress);
             bankAddresses[identifiedBank].push_back(physicalAddress);
-            //bankGroupAddresses[identifiedBankGroup].push_back(physicalAddress);
             identifiedBankGroup = identifiedBank / 4;
             bankGroupAddresses[identifiedBankGroup].push_back(physicalAddress);
             if(verbose) cout << " Channel " << identifiedChannel << " Rank " << identifiedRank << " Bank " << identifiedBank << " BankGroup " << identifiedBankGroup << endl;
+        }
+        else {
+        failedPmuMatches++;
         }
     }
 
@@ -644,6 +647,9 @@ int main(int argc, char *argv[])
         std::cout << "Captured " << bankGroupAddresses[k].size() << " addresses on bankGroup " << k << endl;
     }
     cout << endl;
+
+    std::cout << "Failed PMU matches: " << failedPmuMatches << std::endl;
+    std::cout << "Valid collected samples: " << usedAddresses.size() << std::endl;
 
     uint64_t andAll = std::numeric_limits<uint64_t>::max();
     uint64_t orAll = 0;

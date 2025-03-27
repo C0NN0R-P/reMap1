@@ -582,7 +582,6 @@ int main(int argc, char *argv[])
         int identifiedBankGroup = -1;
         bool found = false;
         long long maxCount = 0; // Track highest event count found
-        long long maxBankGroupCount = 0;
         for(unsigned int channel = 0; channel < 4 && !found; channel++)
         {
             for(unsigned int rank = 0; rank < 8 && !found; rank++)
@@ -613,6 +612,20 @@ int main(int argc, char *argv[])
                         }
                     }
                 }
+
+                for(unsigned int bankGroup = 0; bankGroup < 4; bankGroup++)
+                {
+                    long long initialCount = 0;
+                    auto fd = setupMeasure(cpuid,channel,rank,bankGroup,true);
+                    startMeasure(fd, initialCount);
+                    access(adr,numAccess);
+                    auto count = stopMeasure(fd, initialCount);
+                    if (count >= 0.9*numAccess)
+                    {
+                        identifiedBankGroup = bankGroup;
+                        break;
+                    }
+                }
             }
         }
         if(found)
@@ -620,10 +633,12 @@ int main(int argc, char *argv[])
             channelAddresses[identifiedChannel].push_back(physicalAddress);
             rankAddresses[identifiedRank].push_back(physicalAddress);
             bankAddresses[identifiedBank].push_back(physicalAddress);
-            //bankGroupAddresses[identifiedBankGroup].push_back(physicalAddress);
-            identifiedBankGroup = identifiedBank / 4;
             bankGroupAddresses[identifiedBankGroup].push_back(physicalAddress);
-            if(verbose) cout << " Channel " << identifiedChannel << " Rank " << identifiedRank << " Bank " << identifiedBank << " BankGroup " << identifiedBankGroup << endl;
+            if(verbose) cout << " Channel " << identifiedChannel << " Rank " << identifiedRank << " Bank " << identifiedBank << " BankGroup" << identifiedBankGroup << endl;
+        }
+        else
+        {
+            //std::cout  << " No set found" << endl;
         }
     }
 

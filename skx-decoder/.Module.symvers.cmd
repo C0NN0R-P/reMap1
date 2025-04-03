@@ -1,0 +1,1 @@
+cmd_/home/cim/pgr/pmai286/skx-decoder/Module.symvers := sed 's/\.ko$$/\.o/' /home/cim/pgr/pmai286/skx-decoder/modules.order | scripts/mod/modpost -m -a  -o /home/cim/pgr/pmai286/skx-decoder/Module.symvers -e -i Module.symvers   -T -

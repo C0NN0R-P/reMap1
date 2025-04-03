@@ -1,0 +1,1 @@
+cmd_/home/cim/pgr/pmai286/skx-decoder/skx_decoder.ko := ld -r -m elf_x86_64 -z noexecstack --build-id=sha1  -T scripts/module.lds -o /home/cim/pgr/pmai286/skx-decoder/skx_decoder.ko /home/cim/pgr/pmai286/skx-decoder/skx_decoder.o /home/cim/pgr/pmai286/skx-decoder/skx_decoder.mod.o;  true

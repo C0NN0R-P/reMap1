@@ -556,7 +556,7 @@ int main(int argc, char *argv[])
         bool found = false;
         //long long maxCount = 0; // Track highest event count found
 
-        uint64_t results[512] = {0};
+        std::vector<uint64_t> results[512];
 
         for (unsigned int channel = 0; channel < 4; channel++) {
             for (unsigned int rank = 0; rank < 8; rank++) {
@@ -570,7 +570,11 @@ int main(int argc, char *argv[])
 
                     if (count >= 0 * numAccess) {
                         int idx = (channel << 7) | (rank << 4) | bank;
-                        results[idx] = count;
+                        auto& counts = results[idx];
+                        counts.push_back(count);
+                        std::sort(counts.begin(), counts.end(), std::greater<>());
+                        if (counts.size() > 3)
+                            counts.resize(3);
                     }
                 }
             }
@@ -578,18 +582,29 @@ int main(int argc, char *argv[])
 
         uint64_t maxValue = 0;
         int maxIndex = -1;
-        for (int i = 0; i < 512; i++) {
-            if (results[i] > maxValue) {
-                maxValue = results[i];
-                maxIndex = i;
-            }
-        }
+        for (int idx = 0; idx < 512; idx++) {
+            //if (results[idx] > maxValue) {
+            //    maxValue = results[idx];
+            //    maxIndex = i;
+            //}
+            if (!results[idx].empty()) {
+                int channel = (idx >> 7) & 0b11;
+                int rank = (idx >> 4) & 0b111;
+                int bank = idx & 0b1111;
 
-        int bestChannel = (maxIndex >> 7) & 0b11;
-        int bestRank = (maxIndex >> 4) & 0b111;
-        int bestBank = maxIndex & 0b1111;
+                std::cout << "Channel " << channel << ", Rank " << rank << ", Bank " << bank << " => Top counts: ";
+                for (auto val : results[idx]) {
+                    std::cout << val << " ";
+                }
+                std::cout << std::endl;
+           } 
+       }
 
-        std::cout << "Max PMU count: " << maxValue << " at index " << maxIndex << " (Channel " << bestChannel << ", Rank " << bestRank << ", Bank " << bestBank << ")" << std::endl; 
+       // int bestChannel = (maxIndex >> 7) & 0b11;
+       // int bestRank = (maxIndex >> 4) & 0b111;
+       // int bestBank = maxIndex & 0b1111;
+
+       // std::cout << "Max PMU count: " << maxValue << " at index " << maxIndex << " (Channel " << bestChannel << ", Rank " << bestRank << ", Bank " << bestBank << ")" << std::endl; 
 
     //    if(found && identifiedChannel < 4 && identifiedRank < 8 && identifiedBank < 16)
     //    {

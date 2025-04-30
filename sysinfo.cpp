@@ -8,7 +8,7 @@
 
 namespace fs = std::experimental::filesystem;
 
-const std::vector<std::string> SysInfo::socketIds = {"7f","ff"};
+const std::vector<std::string> SysInfo::socketIds = {"00","80"};
 const std::vector<std::string> SysInfo::controllerIds = {"13","16"};
 const std::string SysInfo::controllerBase = "0";
 const std::vector<std::string> SysInfo::channelIds = {"2","3","4","5"};

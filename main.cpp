@@ -56,14 +56,19 @@ using namespace std;
 static int g_pagemap_fd = -1;
 
 // Minimum PMU counter we accept as a "successful" measurement.
+// If results are below this threshold, the measurement is discarded.
 static const long long pmuThreshold = 3000;
 
-// We store addresses in sets keyed by channel, rank, bank, etc.
+// We store addresses in maps keyed by channel, rank, bank, etc.
 typedef std::map<size_t, std::vector<uint64_t>> AddressSet;
 
 //=============================================================================
 // Allocation routines (try 1GB, 2MB, then 4KB pages).
 //=============================================================================
+/**
+ * Attempt to allocate the requested size using 1GB huge pages.
+ * Returns a pointer on success, or MAP_FAILED on failure.
+ */
 void* tryAllocate1Gb(uint64_t size)
 {
     void* space = mmap(nullptr, size,
@@ -74,6 +79,10 @@ void* tryAllocate1Gb(uint64_t size)
     return space;
 }
 
+/**
+ * Attempt to allocate the requested size using 2MB huge pages.
+ * Returns a pointer on success, or MAP_FAILED on failure.
+ */
 void* tryAllocate2Mb(uint64_t size)
 {
     void* space = mmap(nullptr, size,
@@ -84,6 +93,10 @@ void* tryAllocate2Mb(uint64_t size)
     return space;
 }
 
+/**
+ * Attempt to allocate the requested size using normal 4KB pages.
+ * Returns a pointer on success, or MAP_FAILED on failure.
+ */
 void* tryAllocate4Kb(uint64_t size)
 {
     void* space = mmap(nullptr, size,
@@ -94,8 +107,9 @@ void* tryAllocate4Kb(uint64_t size)
 }
 
 /**
- * allocate: Attempts to allocate 'size' bytes in memory, preferring 1GB pages,
- * then 2MB pages, then standard 4KB pages. Also tries to mlock them.
+ * Tries to allocate 'size' bytes in memory, preferring 1GB pages,
+ * then 2MB pages, then standard 4KB pages. Also attempts mlock() to
+ * pin the memory, preventing swapping.
  */
 void* allocate(uint64_t size)
 {
@@ -151,6 +165,10 @@ void* allocate(uint64_t size)
 //=============================================================================
 // Pagemap & Physical Address Routines
 //=============================================================================
+/**
+ * Extracts the frame number from a pagemap value.
+ * The PFN is in bits 0..53 of the returned value.
+ */
 uint64_t frameNumberFromPagemap(uint64_t value)
 {
     // bits 0..53 are the page frame number
@@ -158,7 +176,7 @@ uint64_t frameNumberFromPagemap(uint64_t value)
 }
 
 /**
- * initPagemap: opens /proc/self/pagemap so we can read it to map
+ * Opens /proc/self/pagemap so we can read it later to convert
  * virtual -> physical addresses.
  */
 void initPagemap()
@@ -168,8 +186,8 @@ void initPagemap()
 }
 
 /**
- * getPhysicalAddr: uses /proc/self/pagemap to retrieve the physical
- * address that corresponds to the given virtual address.
+ * Retrieves the physical address for the given virtual address
+ * using the /proc/self/pagemap interface.
  */
 uint64_t getPhysicalAddr(uint64_t virtualAddr)
 {
@@ -178,23 +196,39 @@ uint64_t getPhysicalAddr(uint64_t virtualAddr)
     int got = pread(g_pagemap_fd, &value, sizeof(value), offset);
     assert(got == 8);
 
-    // check bit 63 => "page present"
+    // bit 63 => "page present" must be set
     assert(value & (1ULL << 63));
 
     uint64_t frame_num = frameNumberFromPagemap(value);
-    // combine with offset-in-page
+
+    // Combine with offset-in-page:
     return (frame_num * 4096ULL) | (virtualAddr & 0xFFFULL);
 }
 
 //=============================================================================
 // Perf Event (PMU) Routines to measure memory channel/rank/bank usage
 //=============================================================================
-int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned int bank)
+
+/**
+ * Sets up a perf_event measurement (PMU) for a given CPU, channel, rank, and bank,
+ * using the PMU type provided (default is 0xd, but user can override -c <hex>).
+ *
+ * NEW: We have added a "channel" parameter to the config, so we incorporate
+ * channel bits into the perf_event configuration as well.
+ *
+ * @param cpuid   The CPU to bind to.
+ * @param channel The memory channel ID (NEW).
+ * @param rank    The DIMM rank ID.
+ * @param bank    The memory bank ID.
+ * @param pmuType The perf_event_attr.type to use (e.g. 0xd).
+ * @return        File descriptor for the perf event, or < 0 on error.
+ */
+int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned int bank, unsigned int pmuType)
 {
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(pe));
 
-    // SysInfo::getImcs() should return info about IMCs. If empty, we can't proceed.
+    // Get the IMCs from SysInfo (your platform-specific code might differ).
     auto imcs = SysInfo::getImcs();
     if (imcs.empty())
     {
@@ -202,14 +236,20 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
         exit(EXIT_FAILURE);
     }
 
-    // Typically IMC is type=0xd on many Intel platforms
-    pe.type = 0xd;
+    // Typically, Intel IMC is type=0xd, but user can override with -c <val>.
+    pe.type = pmuType;
     pe.size = sizeof(struct perf_event_attr);
 
-    // config = (bank << 8) + (0xb0 + rank)
+    // NEW: Incorporate channel bits into the config. Here we put "channel" in the top nibble
+    // to ensure it doesn't overlap with rank or bank bits. This is somewhat arbitrary
+    // and might vary by actual hardware definitions, but is used here for demonstration:
+    //  channel<<12 | bank<<8 | (0xb0 + rank)
+    unsigned int chanBits = (channel << 12);
     unsigned int bankBits = (bank << 8);
-    unsigned int rankBits = 0xb0 + rank; 
-    pe.config = bankBits | rankBits;
+    unsigned int rankBits = (0xb0 + rank);
+
+    // Now combine them:
+    pe.config = chanBits | bankBits | rankBits;
 
     pe.read_format   = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
     pe.sample_type   = PERF_SAMPLE_IDENTIFIER;
@@ -218,15 +258,22 @@ int setupMeasure(int cpuid, unsigned int channel, unsigned int rank, unsigned in
     pe.exclude_hv    = 0;
     pe.precise_ip    = 0;
 
-    // create perf_event FD for the specified CPU
+    // Create the perf_event FD for the specified CPU.
     int fd = syscall(__NR_perf_event_open, &pe, -1, cpuid, -1, 0);
-    return fd; // could be -1 if it failed
+    return fd; // < 0 if failed
 }
 
+/**
+ * Starts measuring on the given perf_event file descriptor.
+ * No-op if fd < 0 (invalid).
+ */
 void startMeasure(int fd)
 {
-    if (fd == -1) return;
+    // If fd < 0, there's no valid measurement to start
+    if (fd < 0) return;
+
     _mm_mfence();
+
     if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) == -1)
     {
         perror("ioctl PERF_EVENT_IOC_RESET");
@@ -239,10 +286,17 @@ void startMeasure(int fd)
     }
 }
 
+/**
+ * Stops measuring on the given perf_event file descriptor, reads
+ * the count, and returns the result. Returns -1 if something fails
+ * or if fd < 0.
+ */
 long long stopMeasure(int fd)
 {
-    if (fd == -1) return -1;
+    if (fd < 0) return -1;
+
     _mm_mfence();
+
     if (ioctl(fd, PERF_EVENT_IOC_DISABLE, 0) == -1)
     {
         perror("ioctl PERF_EVENT_IOC_DISABLE");
@@ -254,6 +308,7 @@ long long stopMeasure(int fd)
         uint64_t time_enabled;
         uint64_t time_running;
     } rf;
+
     if (read(fd, &rf, sizeof(rf)) < 0)
     {
         return -1;
@@ -264,9 +319,14 @@ long long stopMeasure(int fd)
 //=============================================================================
 // Address Access & Generation
 //=============================================================================
+
 /**
- * accessAddress: read from the given addr repeatedly to generate
- * memory events (channel/bank usage) that we can measure via PMU.
+ * Repeatedly reads from the given address to generate PMU events
+ * on that memory location. Each read is separated by cache flush
+ * to force actual memory access.
+ *
+ * @param addr       The address to access repeatedly.
+ * @param numAccess  How many times to read the address.
  */
 void accessAddress(uint64_t addr, size_t numAccess)
 {
@@ -281,7 +341,7 @@ void accessAddress(uint64_t addr, size_t numAccess)
 }
 
 /**
- * getRandomAddress: produce a random offset within [base, base+size),
+ * Generates a random address offset within [base, base+size),
  * aligned to 64 bytes (cache line).
  */
 uint64_t getRandomAddress(uint64_t base, uint64_t size)
@@ -296,8 +356,9 @@ uint64_t getRandomAddress(uint64_t base, uint64_t size)
 }
 
 /**
- * getNextAddress: tries a bit-flip approach (flip one bit in physical addr).
- * If that crosses pages or is invalid, revert to random address.
+ * Attempts a bit-flip approach for the next address: flipping one bit
+ * in the physical address to find nearby addresses that might differ
+ * in important bits. Falls back to random if invalid or crossing pages.
  */
 uint64_t getNextAddress(uint64_t oldAddr, uint64_t base, uint64_t size)
 {
@@ -309,7 +370,11 @@ uint64_t getNextAddress(uint64_t oldAddr, uint64_t base, uint64_t size)
     {
         baseAddr = oldAddr;
     }
+
+    // Physical address of the old base
     uint64_t oldPhys = getPhysicalAddr(baseAddr);
+
+    // Flip a single bit
     uint64_t candidate = baseAddr ^ (1ULL << shift);
 
     if(candidate >= base && candidate < (base + size))
@@ -321,7 +386,7 @@ uint64_t getNextAddress(uint64_t oldAddr, uint64_t base, uint64_t size)
         uint64_t phys = getPhysicalAddr(candidate);
         std::bitset<64> diff(phys ^ oldPhys);
 
-        // if more than 1 bit changed, revert to random
+        // If more than 1 bit changed, revert to random address
         if (diff.count() > 1)
         {
             shift = MIN_SHIFT;
@@ -343,14 +408,20 @@ uint64_t getNextAddress(uint64_t oldAddr, uint64_t base, uint64_t size)
 //=============================================================================
 // Solver & Cleanup Routines
 //=============================================================================
+
+/**
+ * Calculates how many bits remain after we remove some leading/trailing
+ * stuck bits from consideration.
+ */
 uint64_t getUsableBits(uint64_t removeFront, uint64_t removeBack)
 {
     return (64ULL - removeFront - removeBack);
 }
 
 /**
- * cleanAddresses: shift out 'removeFront' low bits and mask out 'removeBack' high bits.
- * This is so we only keep the bits that can vary among the addresses.
+ * Shifts out 'removeFront' low bits and masks out 'removeBack' high bits
+ * from each stored address in the map, so only the bits that can vary remain.
+ * This helps isolate the bits used for channel/bank/etc.
  */
 void cleanAddresses(std::map<size_t,std::vector<size_t>> &addresses,
                     uint64_t removeFront,
@@ -388,7 +459,7 @@ void cleanAddresses(std::map<size_t,std::vector<size_t>> &addresses,
 }
 
 /**
- * compactSets: remove empty sets (those that have 0 addresses).
+ * Removes empty sets (no addresses) from the map so they won't confuse the solver.
  */
 std::map<size_t,std::vector<uint64_t>>
 compactSets(const std::map<size_t,std::vector<uint64_t>> &addresses)
@@ -406,10 +477,16 @@ compactSets(const std::map<size_t,std::vector<uint64_t>> &addresses)
     return newMap;
 }
 
-//------------------------------------------------------
-// Printing "likely bits" solutions from the solver
-//------------------------------------------------------
-void printSolution(const Solver::Solution &s, size_t offset, double userConfidence)
+/**
+ * Prints the solution for a single bit from the solver.
+ * If the solver found an exact solution, we list the involved, uninvolved,
+ * and unknown bits. 
+ *
+ * If no exact solution is found, we revert to showing only those bits
+ * that have a strictly positive frequency (i.e., >0). This is a change from
+ * the prior approach that printed percentages for all bits.
+ */
+void printSolution(const Solver::Solution &s, size_t offset)
 {
     if (s.exists)
     {
@@ -431,9 +508,11 @@ void printSolution(const Solver::Solution &s, size_t offset, double userConfiden
     }
     else
     {
-        // We have no exact solution, so show partial "confidence" info
+        // We have no exact solution, so show the bits that appear > 0 times
         std::cout << "(No exact solution found.)\n";
         std::map<size_t, size_t> bitFrequency;
+
+        // Collect frequency counts for all unknown/involved bits
         for (auto b : s.unknownBits)
         {
             bitFrequency[b] = 0;
@@ -443,7 +522,7 @@ void printSolution(const Solver::Solution &s, size_t offset, double userConfiden
             bitFrequency[b]++;
         }
 
-        // find highest frequency
+        // Find the maximum vote count
         size_t maxVotes = 0;
         for (auto &bf : bitFrequency)
         {
@@ -451,48 +530,55 @@ void printSolution(const Solver::Solution &s, size_t offset, double userConfiden
                 maxVotes = bf.second;
         }
 
-        // any bit with >= userConfidence% of maxVotes is "likely"
-        double threshold = userConfidence; 
-        std::cout << "Likely bits (>=" << threshold << "% confidence): ";
+        // NEW: Instead of printing "percentages" for all bits, we only print bits if frequency>0
+        std::cout << "Likely bits (frequency > 0):\n";
         for (auto &bf : bitFrequency)
         {
-            double c = (maxVotes>0) ? (100.0 * bf.second / (double)maxVotes) : 0.0;
-            if (c >= threshold)
+            // If the frequency is strictly greater than zero, show it
+            if (bf.second > 0)
             {
-                std::cout << (offset + bf.first) << " (" << c << "%) ";
+                std::cout << "  Bit " << (offset + bf.first) 
+                          << " => freq = " << bf.second 
+                          << " (out of " << maxVotes << ")\n";
             }
         }
         std::cout << "\n";
     }
 }
 
+/**
+ * Prints the solutions for all bits in a solver run.
+ */
 void printSolutions(const std::vector<Solver::Solution> &solList,
-                    size_t offset,
-                    double userConfidence)
+                    size_t offset)
 {
     for (size_t i = 0; i < solList.size(); i++)
     {
         std::cout << "Solver bit " << i << " =>\n";
-        printSolution(solList[i], offset, userConfidence);
+        printSolution(solList[i], offset);
         std::cout << "\n";
     }
 }
 
-//------------------------------------------------------
-// Build solver matrix & solve
-//------------------------------------------------------
+/**
+ * Builds the solver matrix and attempts to solve for each addressing bit.
+ * We estimate the number of bits used for a function from the log2 of
+ * the number of distinct sets.
+ */
 std::vector<Solver::Solution>
 calculateAddressingFunction(const std::map<size_t,std::vector<uint64_t>> &addresses,
                             size_t addrFuncBits,
                             size_t usableBits)
 {
     std::vector<Solver::Solution> allSolutions;
+
     for (size_t bit = 0; bit < addrFuncBits; bit++)
     {
         std::vector<uint64_t> matrix;
         Solver solver;
         uint64_t mask = (1ULL << bit);
 
+        // Build a matrix row for each address, along with the bit's value
         for (auto &kv : addresses)
         {
             uint64_t bitValue = (kv.first & mask) >> bit;
@@ -503,7 +589,7 @@ calculateAddressingFunction(const std::map<size_t,std::vector<uint64_t>> &addres
             }
         }
 
-        // require at least some data
+        // We need at least a few addresses to attempt a solution
         if (matrix.size() < 5)
         {
             std::cerr << "WARNING: Not enough data to solve for bit "
@@ -512,21 +598,25 @@ calculateAddressingFunction(const std::map<size_t,std::vector<uint64_t>> &addres
             continue;
         }
 
+        // Attempt to solve
         solver.solve(matrix, usableBits);
         Solver::Solution s = solver.getSolution(matrix);
         allSolutions.push_back(s);
     }
+
     return allSolutions;
 }
 
 /**
- * prepareSolvePrint: cleans & compacts addresses, then calls the solver
- * and prints out the results (including partial solutions if needed).
+ * Helper function that:
+ *  1) "Cleans" addresses to remove stuck bits.
+ *  2) Compacts them.
+ *  3) Builds and solves a matrix for each bit in the addressing function.
+ *  4) Prints the solutions.
  */
 void prepareSolvePrint(std::map<size_t,std::vector<uint64_t>> sets,
                        size_t removeFront,
-                       size_t removeBack,
-                       double userConfidence)
+                       size_t removeBack)
 {
     // Convert from uint64_t to size_t for the cleaning function
     std::map<size_t,std::vector<size_t>> tmp;
@@ -559,10 +649,10 @@ void prepareSolvePrint(std::map<size_t,std::vector<uint64_t>> sets,
         return;
     }
 
-    // We guess #bits = log2(#sets)
+    // Estimate how many bits are used based on the count of sets
     size_t expectedBits = static_cast<size_t>(ceil(log2(cleaned.size())));
 
-    // Solve
+    // Solve for these bits
     auto solutions = calculateAddressingFunction(cleaned,
                                                  expectedBits,
                                                  getUsableBits(removeFront, removeBack));
@@ -583,8 +673,8 @@ void prepareSolvePrint(std::map<size_t,std::vector<uint64_t>> sets,
     }
     std::cout << "===============================================\n";
 
-    // Print solutions
-    printSolutions(solutions, removeFront, userConfidence);
+    // Print the solver solutions
+    printSolutions(solutions, removeFront);
 }
 
 //=============================================================================
@@ -592,17 +682,18 @@ void prepareSolvePrint(std::map<size_t,std::vector<uint64_t>> sets,
 //=============================================================================
 int main(int argc, char *argv[])
 {
-    // Command-line arguments
-    bool verbose          = false;
-    bool considerTad      = false;
-    unsigned int sizeGb   = 20;         // default memory region = 20 GB
-    size_t numAddressTotal = 5000;      // number of successful addresses we want
-    size_t numAccess      = 4000;       // times we access each address
-    double confThreshold  = 50.0;       // default = 50% for "likely bits"
+    // Command-line arguments/flags
+    bool verbose           = false;
+    bool considerTad       = false;
+    unsigned int sizeGb    = 20;    // default memory region = 20 GB
+    size_t numAddressTotal = 5000;  // number of successful addresses
+    size_t numAccess       = 4000;  // times we access each address
+    double confThreshold   = 50.0;  // previously used for threshold; still accepted
+    unsigned int pmuType   = 0xd;   // default PMU type is 0xd
 
-    // Parse arguments
+    // Parse arguments. New flag: '-c' to override PMU type.
     int opt;
-    while ((opt = getopt(argc, argv, "vrs:n:a:t:")) != -1)
+    while ((opt = getopt(argc, argv, "vrs:n:a:t:c:")) != -1)
     {
         switch (opt)
         {
@@ -616,7 +707,6 @@ int main(int argc, char *argv[])
                 sizeGb = static_cast<unsigned int>(atoi(optarg));
                 break;
             case 'n':
-                // user wants n successful addresses
                 numAddressTotal = static_cast<size_t>(atoi(optarg));
                 break;
             case 'a':
@@ -624,6 +714,10 @@ int main(int argc, char *argv[])
                 break;
             case 't':
                 confThreshold = atof(optarg);
+                break;
+            case 'c':
+                // User can specify the PMU type in hex or decimal
+                pmuType = strtoul(optarg, nullptr, 0);
                 break;
             default:
                 std::cerr 
@@ -633,7 +727,8 @@ int main(int argc, char *argv[])
                     << "  -s <size GB>\n"
                     << "  -n <#successful addresses to collect>\n"
                     << "  -a <#accesses per test>\n"
-                    << "  -t <confidence threshold %> (default 50.0)\n";
+                    << "  -t <confidence threshold %> (deprecated usage)\n"
+                    << "  -c <PMU type> (default 0xd)\n";
                 return EXIT_FAILURE;
         }
     }
@@ -648,7 +743,7 @@ int main(int argc, char *argv[])
     if (verbose)
         std::cout << "Running on socket (NUMA node) " << nodeid << std::endl;
 
-    // Open pagemap for reading
+    // Open pagemap for reading (virtual -> physical mapping)
     initPagemap();
 
     // Allocate memory
@@ -661,7 +756,7 @@ int main(int argc, char *argv[])
     }
     uint64_t spaceBase = reinterpret_cast<uint64_t>(space);
 
-    // seed random generator
+    // Seed the random generator
     srand(3344);
 
     // We store addresses in separate sets for each channel/rank/bank/bankGroup
@@ -673,23 +768,19 @@ int main(int argc, char *argv[])
     int successfulMatches = 0;
     int failedMatches     = 0;
 
-    // Instead of "usedPhysicalAddrs.size() < numAddressTotal", 
-    // we do "while(successfulMatches < numAddressTotal)" so we 
-    // truly get N successful attempts.
+    // We want numAddressTotal successful addresses with PMU counts > pmuThreshold.
     std::cout << "Collecting " << numAddressTotal 
               << " successful address samples...\n";
+
     uint64_t nextVA = spaceBase;
 
-    // We'll keep going until we get "numAddressTotal" successful addresses.
-    // Note that if pmuThreshold is high or the system is not responding,
-    // we might loop for a while.
+    // Keep looping until we collect enough successful addresses
     while (successfulMatches < (int)numAddressTotal)
     {
-        // pick next address
+        // Pick the next address (bit-flip or random)
         nextVA = getNextAddress(nextVA, spaceBase, totalBytes);
         uint64_t phys = getPhysicalAddr(nextVA);
 
-        // We'll measure across channels/ranks/banks
         static const unsigned int maxChannels = 4;
         static const unsigned int maxRanks    = 8;
         static const unsigned int maxBanks    = 16;
@@ -697,15 +788,15 @@ int main(int argc, char *argv[])
         long long results[512];
         memset(results, 0, sizeof(results));
 
-        // For each channel/rank/bank combination
+        // Measure memory events for each ch/rank/bank
         for (unsigned int ch = 0; ch < maxChannels; ch++)
         {
             for (unsigned int rk = 0; rk < maxRanks; rk++)
             {
                 for (unsigned int bk = 0; bk < maxBanks; bk++)
                 {
-                    int fd = setupMeasure(cpuid, ch, rk, bk);
-                    if (fd < 0) 
+                    int fd = setupMeasure(cpuid, ch, rk, bk, pmuType);
+                    if (fd < 0)
                         continue; // skip if we can't open the perf event
 
                     startMeasure(fd);
@@ -713,13 +804,14 @@ int main(int argc, char *argv[])
                     long long count = stopMeasure(fd);
                     close(fd);
 
+                    // Index: channel in top bits, rank in middle, bank in low bits
                     int idx = (ch << 7) | (rk << 4) | bk;
                     results[idx] = count;
                 }
             }
         }
 
-        // find the best match
+        // Find the best match channel/rank/bank
         long long maxVal = 0;
         int maxIdx = -1;
         for (int i = 0; i < 512; i++)
@@ -731,7 +823,7 @@ int main(int argc, char *argv[])
             }
         }
 
-        // discard if below threshold
+        // If below threshold, discard this address
         if (maxIdx < 0 || maxVal < pmuThreshold)
         {
             failedMatches++;
@@ -744,12 +836,12 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        // decode the best channel/rank/bank
+        // Decode the best channel/rank/bank from maxIdx
         int bestCh   = (maxIdx >> 7) & 0x3;
         int bestRank = (maxIdx >> 4) & 0x7;
         int bestBank = (maxIdx     ) & 0xF;
 
-        // store this address
+        // Store this address in the appropriate sets
         channelAddrs[bestCh].push_back(phys);
         rankAddrs[bestRank].push_back(phys);
         bankAddrs[bestBank].push_back(phys);
@@ -782,12 +874,8 @@ int main(int argc, char *argv[])
     for (size_t g = 0; g < 4; g++)
         std::cout << "BankGroup " << g << " => " << bankGroupAddrs[g].size() << " addresses\n";
 
-    // Next, find "stuck" bits across all successful addresses.
-    // We can combine them all if we want. Alternatively, we can do 
-    // a separate set. For simplicity, let's combine them in a set:
+    // Gather all successful physical addresses into a single set
     std::set<uint64_t> allUsedPhys;
-    // gather all addresses from channelAddrs, etc. 
-    // or we can gather them as we go, but let's do it now:
     for (auto &kv : channelAddrs)
     {
         for (auto p : kv.second)
@@ -796,7 +884,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Now compute AND & OR of all addresses
+    // Compute the AND & OR of all addresses to detect stuck bits
     uint64_t andAll = 0xFFFFFFFFFFFFFFFFULL;
     uint64_t orAll  = 0ULL;
     for (auto p : allUsedPhys)
@@ -805,7 +893,6 @@ int main(int argc, char *argv[])
         orAll  |= p;
     }
 
-    // Print debug if verbose
     if (verbose)
     {
         std::cout << "Physical addresses used: " << allUsedPhys.size() << "\n";
@@ -813,20 +900,20 @@ int main(int argc, char *argv[])
         std::cout << " OR of addresses = 0x" << std::hex << orAll  << std::dec << "\n";
     }
 
-    // figure out which bits never vary => "stuck"
+    // Determine which bits never vary (stuck bits)
     std::bitset<64> andAllBits(andAll);
     std::bitset<64> orAllBits(orAll);
     std::bitset<64> unknownBits(0ULL);
     for (size_t i = 0; i < 64; i++)
     {
+        // If bit i never becomes 1 or never becomes 0, it's stuck.
         if (!orAllBits.test(i) || andAllBits.test(i))
         {
-            // bit i is stuck
             unknownBits.set(i);
         }
     }
 
-    // removeFront => first non-stuck bit from bottom
+    // removeFront => first non-stuck bit from the bottom
     uint64_t removeFront = 0;
     for (size_t i = 0; i < 64; i++)
     {
@@ -837,7 +924,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // removeBack => first non-stuck bit from top
+    // removeBack => first non-stuck bit from the top
     uint64_t removeBack = 0;
     for (int i = 63; i >= 0; i--)
     {
@@ -855,31 +942,29 @@ int main(int argc, char *argv[])
                   << ", confThreshold=" << confThreshold << "%\n";
     }
 
-    // If TAD consideration is needed, you'd do that logic here.
+    // If we consider TAD (address hashing) logic, place code here...
     if (considerTad)
     {
-        // e.g. parse TAD regions from SysInfo
-        // subdivide addresses by region
-        // run the solver on each region
+        // Example placeholder for TAD region logic
         // ...
     }
     else
     {
         // Solve for channel bits
         std::cout << "\n=== Solving Channel Bits ===\n";
-        prepareSolvePrint(channelAddrs, removeFront, removeBack, confThreshold);
+        prepareSolvePrint(channelAddrs, removeFront, removeBack);
 
         // Solve for rank bits
         std::cout << "\n=== Solving Rank Bits ===\n";
-        prepareSolvePrint(rankAddrs, removeFront, removeBack, confThreshold);
+        prepareSolvePrint(rankAddrs, removeFront, removeBack);
 
         // Solve for bank bits
         std::cout << "\n=== Solving Bank Bits ===\n";
-        prepareSolvePrint(bankAddrs, removeFront, removeBack, confThreshold);
+        prepareSolvePrint(bankAddrs, removeFront, removeBack);
 
         // Solve for bank group bits
         std::cout << "\n=== Solving Bank Group Bits ===\n";
-        prepareSolvePrint(bankGroupAddrs, removeFront, removeBack, confThreshold);
+        prepareSolvePrint(bankGroupAddrs, removeFront, removeBack);
     }
 
     return 0;
